@@ -96,6 +96,33 @@ const productSchema = new mongoose.Schema({
       message: 'Auto-accept price cannot be higher than listing price'
     }
   },
+
+  // Promotional Features
+  acceptsDiscounts: {
+    type: Boolean,
+    default: false
+  },
+  maxDiscountPercent: {
+    type: Number,
+    default: 10,
+    min: 0,
+    max: 50 // Cap at 50% for safety
+  },
+  
+  // Track which promotions this listing is eligible for
+  eligiblePromotions: [{
+    type: String, // 'holiday2024', 'student', 'military', etc.
+  }],
+  
+  // Analytics for discount usage
+  discountStats: {
+    timesDiscountApplied: { type: Number, default: 0 },
+    totalDiscountValue: { type: Number, default: 0 },
+    lastDiscountUsed: Date
+  }
+}, {
+  timestamps: true,
+
   
   // Images (Cloudinary integration)
   images: [{

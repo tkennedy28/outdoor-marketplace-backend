@@ -1,4 +1,4 @@
-// server.js  — CommonJS, single DB connect, single middleware stack, single listener
+// server.js — single DB connect, single middleware stack, single listener
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -27,15 +27,18 @@ if (!STRIPE_SECRET_KEY) {
   console.error('❌ STRIPE_SECRET_KEY is not set');
   process.exit(1);
 }
+
+// Use a single configured Stripe client from ./config/stripe
 const stripe = require('./config/stripe');
 
 /* ------------------------------- APP SETUP ------------------------------- */
 const app = express();
 app.disable('x-powered-by');
 
-// Security & CORS
+// Security (CSP left default-safe by helmet; customize if needed)
 app.use(helmet());
 
+// CORS
 const defaultOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
@@ -50,7 +53,7 @@ app.use(cors({
     // allow curl/mobile or same-origin server-to-server
     if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error('Not allowed by CORS'));
+    return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
   methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'],
@@ -66,31 +69,28 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 /* ----------------------------- RATE LIMITING ----------------------------- */
-// General API limiter
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300
-});
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
 app.use('/api/', apiLimiter);
 
-// Stricter limits for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5
-});
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/signup', authLimiter);
 
 /* --------------------------------- ROUTES -------------------------------- */
-// Mount routers (make sure these files export an Express Router)
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/users');
-const productRoutes = require('./routes/products');
-const uploadRoutes = require('./routes/upload');
-const offerRoutes = require('./routes/offers');
-const messageRoutes = require('./routes/messages');
-const paymentRoutes = require('./routes/payments');
+// Core routers (these should already exist)
+const authRoutes     = require('./routes/auth');
+const userRoutes     = require('./routes/users');
+const productRoutes  = require('./routes/products');
+const uploadRoutes   = require('./routes/upload');
+const offerRoutes    = require('./routes/offers');
+const messageRoutes  = require('./routes/messages');
+const paymentRoutes  = require('./routes/payments');
 
+// NEW: discounts + admin promotions (ensure files exist)
+const discountRoutes        = require('./routes/discounts');            // POST /apply, /validate
+const adminPromotionRoutes  = require('./routes/admin/promotions');     // Admin CRUD
+
+// Mount
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/products', productRoutes);
@@ -98,8 +98,10 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/discounts', discountRoutes);
+app.use('/api/admin/promotions', adminPromotionRoutes);
 
-// Test payment (dynamic amount) — keeps your original functionality
+// Test payment (dynamic amount)
 app.post('/api/test-payment', async (req, res) => {
   try {
     const { amount, metadata } = req.body;
@@ -133,13 +135,12 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// Statistics endpoint (preserves your counts)
 app.get('/api/stats/overview', async (_req, res) => {
   try {
-    const Offer = require('./models/Offer');
-    const Message = require('./models/Message');
+    const Offer        = require('./models/Offer');
+    const Message      = require('./models/Message');
     const Conversation = require('./models/Conversation');
-    const Product = require('./models/Product');
+    const Product      = require('./models/Product');
 
     const [
       totalOffers,
@@ -156,7 +157,7 @@ app.get('/api/stats/overview', async (_req, res) => {
     ]);
 
     res.json({
-      offers: { total: totalOffers, active: activeOffers },
+      offers:   { total: totalOffers, active: activeOffers },
       messages: { total: totalMessages, activeConversations },
       listings: { available: totalListings }
     });
@@ -177,8 +178,8 @@ function initializeCronJobs() {
   cron.schedule('0 * * * *', async () => {
     try {
       console.log('⏰ Running expired offers check...');
-      const Offer = require('./models/Offer');
-      const Message = require('./models/Message');
+      const Offer        = require('./models/Offer');
+      const Message      = require('./models/Message');
       const Conversation = require('./models/Conversation');
 
       const expiredOffers = await Offer.find({
@@ -239,7 +240,7 @@ function initializeCronJobs() {
 }
 
 /* --------------------------- ERROR HANDLERS ----------------------------- */
-// Centralized error handler (one instance)
+// Centralized error handler (keep AFTER routes)
 app.use((err, _req, res, _next) => {
   console.error(err);
   const status = err.status || 500;
@@ -259,12 +260,13 @@ app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
     await mongoose.connect(MONGODB_URI, { dbName: DB_NAME });
     console.log('✅ MongoDB connected');
 
-    // Ensure models are loaded
+    // Ensure models are loaded (include PromotionCode so it registers)
     require('./models/Offer');
     require('./models/Message');
     require('./models/Conversation');
     require('./models/Product');
     require('./models/User');
+    require('./models/PromotionCode');  // NEW
 
     // Start cron jobs after DB connect
     initializeCronJobs();
@@ -294,6 +296,8 @@ app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
         console.log(`💳 Test Payment:  /api/test-payment`);
         console.log(`💬 Messages API:  /api/messages`);
         console.log(`🤝 Offers API:    /api/offers`);
+        console.log(`🏷️ Discounts:     /api/discounts`);
+        console.log(`🛠️ Admin promos:  /api/admin/promotions`);
       });
       module.exports = { app, io, server };
     } else {
@@ -303,6 +307,8 @@ app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
         console.log(`💳 Test Payment:  /api/test-payment`);
         console.log(`💬 Messages API:  /api/messages`);
         console.log(`🤝 Offers API:    /api/offers`);
+        console.log(`🏷️ Discounts:     /api/discounts`);
+        console.log(`🛠️ Admin promos:  /api/admin/promotions`);
       });
       module.exports = app;
     }
