@@ -11,11 +11,11 @@ const path = require('path');
 /* ------------------------- ENV & REQUIRED CONFIG ------------------------- */
 const {
   NODE_ENV = 'production',
-  PORT = 3000,                          // Railway will override with process.env.PORT
+  PORT = 3000, // Railway will override with process.env.PORT
   MONGODB_URI,
   STRIPE_SECRET_KEY,
   ENABLE_WEBSOCKET = 'false',
-  ALLOWED_ORIGINS,                      // comma-separated list in prod
+  ALLOWED_ORIGINS, // comma-separated list in prod
   DB_NAME = 'app'
 } = process.env;
 
@@ -28,6 +28,11 @@ if (!STRIPE_SECRET_KEY) {
   process.exit(1);
 }
 
+// Prod best practice: disable autoIndex; we’ll sync explicitly after connect
+if (NODE_ENV === 'production') {
+  mongoose.set('autoIndex', false);
+}
+
 // Use a single configured Stripe client from ./config/stripe
 const stripe = require('./config/stripe');
 
@@ -35,7 +40,7 @@ const stripe = require('./config/stripe');
 const app = express();
 app.disable('x-powered-by');
 
-// Security (CSP left default-safe by helmet; customize if needed)
+// Security
 app.use(helmet());
 
 // CORS
@@ -50,14 +55,13 @@ const allowedOrigins = (ALLOWED_ORIGINS ? ALLOWED_ORIGINS.split(',') : defaultOr
 
 app.use(cors({
   origin: (origin, cb) => {
-    // allow curl/mobile or same-origin server-to-server
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);               // allow server-to-server / curl
     if (allowedOrigins.includes(origin)) return cb(null, true);
     return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
-  methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','x-auth-token'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-auth-token'],
   exposedHeaders: ['x-auth-token']
 }));
 
@@ -77,7 +81,6 @@ app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/signup', authLimiter);
 
 /* --------------------------------- ROUTES -------------------------------- */
-// Core routers (these should already exist)
 const authRoutes     = require('./routes/auth');
 const userRoutes     = require('./routes/users');
 const productRoutes  = require('./routes/products');
@@ -86,9 +89,9 @@ const offerRoutes    = require('./routes/offers');
 const messageRoutes  = require('./routes/messages');
 const paymentRoutes  = require('./routes/payments');
 
-// NEW: discounts + admin promotions (ensure files exist)
-const discountRoutes        = require('./routes/discounts');            // POST /apply, /validate
-const adminPromotionRoutes  = require('./routes/admin/promotions');     // Admin CRUD
+// Discounts + admin promotions (ensure these files exist)
+const discountRoutes        = require('./routes/discounts');           // POST /apply, /validate
+const adminPromotionRoutes  = require('./routes/admin/promotions');    // Admin CRUD
 
 // Mount
 app.use('/api/auth', authRoutes);
@@ -261,12 +264,25 @@ app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
     console.log('✅ MongoDB connected');
 
     // Ensure models are loaded (include PromotionCode so it registers)
+    const User           = require('./models/User');
     require('./models/Offer');
     require('./models/Message');
     require('./models/Conversation');
     require('./models/Product');
-    require('./models/User');
-    require('./models/PromotionCode');  // NEW
+    const PromotionCode  = require('./models/PromotionCode');
+
+    // 💡 Keep indexes tidy: drop dupes and create missing ones, now that models are loaded
+    try {
+      await Promise.all([
+        User.syncIndexes(),
+        PromotionCode.syncIndexes(),
+        // Add others here if you add unique indexes in those schemas later
+      ]);
+      console.log('✅ Indexes synced');
+    } catch (idxErr) {
+      console.error('❌ Index sync error:', idxErr);
+      // Not fatal, but worth logging
+    }
 
     // Start cron jobs after DB connect
     initializeCronJobs();
